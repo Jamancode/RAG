@@ -1,0 +1,137 @@
+# monitoring/alerts.yml
+groups:
+  - name: rag_system_alerts
+    interval: 30s
+    rules:
+      # Pipeline Performance Alerts
+      - alert: SlowEmbeddingGeneration
+        expr: rate(rag_system_embedding_duration_seconds_sum[5m]) / rate(rag_system_embedding_duration_seconds_count[5m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Embedding generation is slow"
+          description: "Average embedding generation time is {{ $value }}s (threshold: 2s)"
+
+      - alert: SlowVectorSearch
+        expr: histogram_quantile(0.95, rate(rag_system_query_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vector search queries are slow"
+          description: "95th percentile query time is {{ $value }}s (threshold: 1s)"
+
+      # Resource Usage Alerts
+      - alert: HighMemoryUsage
+        expr: rag_system_memory_usage_megabytes > 8000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is {{ $value }}MB (threshold: 8000MB)"
+
+      - alert: HighCPUUsage
+        expr: rag_system_cpu_usage_percent > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage detected"
+          description: "CPU usage is {{ $value }}% (threshold: 80%)"
+
+      - alert: DiskSpaceRunningLow
+        expr: rag_system_disk_usage_percent > 85
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk space is running low"
+          description: "Disk usage is {{ $value }}% (threshold: 85%)"
+
+      # Pipeline Health Alerts
+      - alert: ExtractionErrors
+        expr: rate(rag_system_extraction_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Extraction errors detected"
+          description: "Extraction error rate is {{ $value }} errors/sec"
+
+      - alert: NoRecentDataProcessed
+        expr: time() - max(rag_system_rows_extracted_total) > 3600
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "No data processed recently"
+          description: "No new data has been extracted for {{ $value }}s"
+
+      # Vector Database Alerts
+      - alert: VectorCountStagnant
+        expr: delta(rag_system_total_vectors_in_database[1h]) == 0
+        for: 6h
+        labels:
+          severity: info
+        annotations:
+          summary: "Vector count has not changed"
+          description: "No new vectors added to database in the last 6 hours"
+
+      - alert: LargeVectorDatabase
+        expr: rag_system_total_vectors_in_database > 10000000
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "Large vector database"
+          description: "Database contains {{ $value }} vectors (>10M)"
+
+      # Service Availability
+      - alert: PipelineDown
+        expr: up{job="rag-pipeline"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RAG Pipeline is down"
+          description: "RAG Pipeline has been down for more than 5 minutes"
+
+      - alert: InterfaceDown
+        expr: up{job="rag-interface"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RAG Interface is down"
+          description: "RAG Web Interface has been down for more than 5 minutes"
+
+      # Performance Degradation
+      - alert: IncrementalProcessingSlow
+        expr: rate(rag_system_extraction_duration_seconds_sum[5m]) / rate(rag_system_extraction_duration_seconds_count[5m]) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Incremental processing is slow"
+          description: "Average extraction time per batch is {{ $value }}s (threshold: 30s)"
+
+      - alert: PCAProcessingSlow
+        expr: rate(rag_system_pca_duration_seconds_sum[5m]) / rate(rag_system_pca_duration_seconds_count[5m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PCA processing is slow"
+          description: "Average PCA processing time is {{ $value }}s (threshold: 10s)"
+
+      # Data Quality
+      - alert: HighQueryFailureRate
+        expr: rate(rag_system_queries_processed_total[5m]) > 0 and rate(rag_system_query_errors_total[5m]) / rate(rag_system_queries_processed_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High query failure rate"
+          description: "{{ $value }}% of queries are failing (threshold: 5%)"

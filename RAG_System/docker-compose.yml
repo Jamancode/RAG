@@ -1,0 +1,182 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: rag_postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-raguser}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ragpassword}
+      POSTGRES_DB: ${DB_NAME:-ragdb}
+      POSTGRES_INITDB_ARGS: "-c shared_buffers=512MB -c work_mem=32MB"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-raguser}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Ollama for LLM inference
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # RAG Pipeline Worker
+  rag-pipeline:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag_pipeline
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-raguser}
+      - DB_PASSWORD=${DB_PASSWORD:-ragpassword}
+      - DB_NAME=${DB_NAME:-ragdb}
+      - OLLAMA_HOST=http://ollama:11434
+      - ENABLE_MONITORING=true
+      - PROMETHEUS_PORT=8001
+    volumes:
+      - ./data_cache:/app/data_cache
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    ports:
+      - "8001:8001"  # Metrics
+    restart: unless-stopped
+    command: ["python", "pipeline_orchestrator.py", "--mode", "auto"]
+
+  # RAG Web Interface
+  rag-interface:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag_interface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-raguser}
+      - DB_PASSWORD=${DB_PASSWORD:-ragpassword}
+      - DB_NAME=${DB_NAME:-ragdb}
+      - OLLAMA_HOST=http://ollama:11434
+      - ENABLE_MONITORING=true
+      - PROMETHEUS_PORT=8002
+    volumes:
+      - ./data_cache:/app/data_cache:ro
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    ports:
+      - "7860:7860"  # Gradio UI
+      - "8002:8002"  # Metrics
+    restart: unless-stopped
+    command: ["python", "04_chat_interface.py"]
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: rag_prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: rag_grafana
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  # Nginx reverse proxy (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: rag_nginx
+    depends_on:
+      - rag-interface
+      - grafana
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
+
+  # Backup service (runs periodically)
+  backup:
+    image: postgres:15-alpine
+    container_name: rag_backup
+    depends_on:
+      - postgres
+    environment:
+      - PGHOST=postgres
+      - PGUSER=${DB_USER:-raguser}
+      - PGPASSWORD=${DB_PASSWORD:-ragpassword}
+      - PGDATABASE=${DB_NAME:-ragdb}
+    volumes:
+      - ./backups:/backups
+    command: |
+      sh -c 'while true; do
+        echo "Starting backup at $$(date)"
+        pg_dump -Fc > /backups/ragdb_$$(date +%Y%m%d_%H%M%S).dump
+        find /backups -name "*.dump" -mtime +7 -delete
+        echo "Backup completed"
+        sleep 86400
+      done'
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  ollama_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: rag_network
